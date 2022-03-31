@@ -12,15 +12,20 @@ class LVN:
         # key is value, value is value number
         self.value_to_number = {}
 
-    def make_value(self, op, args):
+    def make_value(self, instr):
+        op = instr["op"]
+        if op == "const":
+            return (op, instr["value"])
+        args = instr["args"]
         arg_numbers = tuple(self.environment[arg] for arg in args)
         return (op, arg_numbers)
 
     def add_instr(self, instr):
+        if "dest" not in instr:
+            # assume there's a side effect, and this isn't a value
+            return
         dest = instr["dest"]
-        args = instr["args"]
-        op = instr["op"]
-        value = self.make_value(op, args)
+        value = self.make_value(instr)
         if value in self.value_to_number:
             number = self.value_to_number[value]
         else:
@@ -31,18 +36,51 @@ class LVN:
 
 
     def reconstruct_instr(self, instr):
-        dest = instr["dest"]
-        args = instr["args"]
-        op = instr["op"]
         # See if we can replace the whole value.
-        value = self.make_value(op, args)
-        canonical = self.value_table[self.value_to_number[value]][1]
-        if canonical != dest:
-            instr["op"] = "id"
-            instr["args"] = [canonical]
-        else:
-            # The first time value is defined.
+        if "dest" in instr:
+            value = self.make_value(instr)
+            canonical = self.value_table[self.value_to_number[value]][1]
+            if canonical != instr["dest"]:
+                instr["op"] = "id"
+                instr["args"] = [canonical]
+                return
+        if "args" in instr:
+            value = self.make_value(instr)
             instr["args"] = [self.value_table[number][1] for number in value[1]]
+
+# find defs not used or later overwritten
+def delete_deadcode(block):
+    # map from variable to instr index
+    defs = {}
+    instr_to_delete = set()
+    for i, instr in enumerate(block):
+        # check usage
+        args = instr["args"] if "args" in instr else []
+        for var in args:
+            if var in defs:
+                del defs[var]
+        # check defs
+        if "dest" in instr:
+            if instr["dest"] in defs:
+                instr_to_delete.add(defs[instr["dest"]])
+            defs[instr["dest"]] = i
+
+    instr_to_delete |= set(defs.values())
+    # assemble new block
+    new_block = []
+    for i, instr in enumerate(block):
+        if i not in instr_to_delete:
+            new_block.append(instr)
+    return new_block
+
+# iterate until convergence
+def delete_deadcode_converge(block):
+    prev = block
+    new = delete_deadcode(prev)
+    while prev != new:
+        prev = new
+        new = delete_deadcode(prev)
+    return new
 
 def lvn_block(block):
     # compute local value numbering and modifies block in place
@@ -57,9 +95,13 @@ def lvn():
     prog = json.load(sys.stdin)
     for func in prog['functions']:
         block_by_label, labels = blocks_by_label(form_blocks(func['instrs']))
-        for block in block_by_label.values():
+        new_block_by_label= {}
+        for k, block in block_by_label.items():
             lvn_block(block)
-        func["instrs"] = blocks_to_json(labels, block_by_label)
+            new_block = delete_deadcode_converge(block)
+            new_block_by_label[k] = new_block
+
+        func["instrs"] = blocks_to_json(labels, new_block_by_label)
     print(json.dumps(prog))
 
 
